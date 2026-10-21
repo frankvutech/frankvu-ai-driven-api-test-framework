@@ -103,7 +103,8 @@ started from its own Compose stack.
 | Leak scan of a full run's Allure results | no password, token or card number found |
 | `ruff check`, `ruff format --check`, `mypy --strict` (53 files) | clean |
 | gitleaks 8.30.1, actionlint 1.7.12 | clean |
-| GitHub Actions workflow | **configured and linted, not yet run on GitHub** (no remote) |
+| GitHub Actions `quality` job (PR #1, run 39643703524) | **passed on GitHub** |
+| GitHub Actions `api` job | **not yet run on GitHub**: stops at its first step until `vars.BACKEND_REPOSITORY` (or `vars.MTP_EXTERNAL_BASE_URL`) is set |
 
 Not run: a hosted Pact Broker (PactFlow); staging; Python 3.13; Linux outside Docker.
 

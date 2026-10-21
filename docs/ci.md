@@ -4,11 +4,12 @@
 and manual dispatch. Actions are pinned to commit SHAs; uv 0.11.31, Python 3.12, Temurin 21 for the
 Allure CLI.
 
-> **Status: configured, linted, not yet run on GitHub.** The workflow passes `actionlint 1.7.12`
-> (including shellcheck of every `run:` block), and every command it runs was executed locally in the
-> same order against a backend started the same way (`scripts/backend.sh up` with
-> `ENVIRONMENT=testing`). It has not been executed by GitHub Actions: this repository has no remote
-> yet, and the backend repository's location is a variable you set (`vars.BACKEND_REPOSITORY`).
+> **Status.** The `quality` job has **passed on GitHub Actions** (PR #1, run 39643703524). The `api`
+> job has **not yet run its tests on GitHub**: it stops at its first step, by design, until
+> `vars.BACKEND_REPOSITORY` (or `vars.MTP_EXTERNAL_BASE_URL`) is set. Every command it runs was
+> executed locally in the same order against a backend started the same way (`scripts/backend.sh up`
+> with `ENVIRONMENT=testing`), and the workflow passes `actionlint 1.7.12` (including shellcheck of
+> every `run:` block).
 
 No mobile build, emulator, simulator or UI-test step exists.
 
