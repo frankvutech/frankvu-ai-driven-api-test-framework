@@ -1,0 +1,20 @@
+# gitleaks configuration: the default rules, plus allow-listing of values that are public by design.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented, public test fixtures of the ShopTest backend"
+regexes = [
+  # The backend's documented seed passwords (docs/test-credentials.md) and the Visa test PAN.
+  '''(Customer|Premium|Admin|Locked)123!''',
+  '''4111111111111111''',
+  # Pact placeholders that stand in for real tokens.
+  '''example\.access\.token''',
+  '''eyJhbGciOiJIUzI1NiJ9\.example\.(access|refresh)''',
+]
+paths = [
+  '''\.venv/''',
+  '''\.tools/''',
+  '''artifacts/''',
+  '''uv\.lock''',
+]

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Local configuration and secrets — never commit a real .env.
+.env
+.env.*
+!.env.example
+
+# Run output: Allure results/reports, run manifests, verifier logs.
+artifacts/
+# Pinned tool downloads (Allure CLI).
+.tools/
+
+# Generated Pact files are build output; publish them to the Broker or upload them as CI artifacts.
+pacts/*.json
+!pacts/README.md

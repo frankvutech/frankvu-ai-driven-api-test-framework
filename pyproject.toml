@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mtp-api-tests"
+version = "0.1.0"
+description = "pytest API, Pact and Allure test framework for the Mobile Test Playground (ShopTest) backend."
+readme = "README.md"
+# 3.12 is the reference version: it is what the backend under test runs on, and what CI uses.
+# pact-python 4.x needs >= 3.11; 3.13 is allowed but not exercised in CI.
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+
+# Exact pins. A test framework whose dependencies drift between two runs cannot tell a backend
+# regression from a library upgrade. Upgrade deliberately: change the pin, run `make check`, commit
+# the new `uv.lock`.
+dependencies = [
+    "httpx==0.28.1",
+    "pydantic==2.14.1",
+    "pydantic-settings==2.16.1",
+    "pytest==9.1.1",
+    "allure-pytest==2.16.2",
+    "pact-python==4.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.1",
+    "mypy==2.4.0",
+]
+
+[project.entry-points.pytest11]
+# The fixtures, safety checks and Allure metadata are a pytest plugin, so every test directory gets
+# them without a chain of conftest imports.
+mtp_api_tests = "api_tests.fixtures.plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/api_tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "S", "PT", "RET", "PL", "TID"]
+ignore = [
+    "PLR2004", # magic values: status codes and seeded prices are the point of an assertion
+    "PLR0913", # resource client methods mirror the endpoint's parameters
+]
+
+[tool.ruff.lint.per-file-ignores]
+# `assert` is how pytest tests assert; hard-coded documented test credentials are fixture data.
+"tests/**" = ["S101", "S105", "S106", "PLR0915"]
+"src/api_tests/fixtures/plugin.py" = ["PLR0915"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["pact"]
+known-first-party = ["api_tests", "support"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src:tests"
+files = ["src", "tests"]
+explicit_package_bases = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# Tests stay fully typed, but allure's decorators and pytest's parametrised fixtures are untyped.
+module = ["functional.*", "contracts.*", "unit.*", "support.*", "conftest"]
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+# allure-python-commons ships no type information.
+module = ["allure", "allure_commons.*"]
+ignore_missing_imports = true
