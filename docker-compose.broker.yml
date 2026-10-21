@@ -1,0 +1,29 @@
+# A throwaway local Pact Broker, for trying the Broker workflow end to end without a hosted one.
+#
+#   docker compose -f docker-compose.broker.yml up -d       # http://localhost:9292
+#   docker compose -f docker-compose.broker.yml down -v     # and forget everything
+#
+# SQLite inside the container: fine for a laptop, not for a team. Basic auth with throwaway
+# development credentials — a real Broker's credentials belong in CI secrets, never in a file.
+
+name: mtp-pact-broker
+
+services:
+  pact-broker:
+    image: pactfoundation/pact-broker:2.143.0-pactbroker2.121.0
+    ports:
+      - "${PACT_BROKER_HOST_PORT:-9292}:9292"
+    environment:
+      PACT_BROKER_DATABASE_URL: "sqlite:////tmp/pact_broker.sqlite3"
+      PACT_BROKER_BASIC_AUTH_USERNAME: "${PACT_BROKER_LOCAL_USERNAME:-pact}"
+      PACT_BROKER_BASIC_AUTH_PASSWORD: "${PACT_BROKER_LOCAL_PASSWORD:-pact-local-only}"
+      PACT_BROKER_ALLOW_PUBLIC_READ: "false"
+      # The heartbeat must answer without credentials, or the healthcheck below cannot use it.
+      PACT_BROKER_PUBLIC_HEARTBEAT: "true"
+      PACT_BROKER_LOG_LEVEL: "INFO"
+      PACT_BROKER_PORT: "9292"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9292/diagnostic/status/heartbeat"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

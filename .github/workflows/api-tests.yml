@@ -1,0 +1,299 @@
+# API functional tests, Pact consumer contracts and Pact provider verification against a dedicated,
+# throwaway ShopTest backend — with an Allure report generated even when tests fail.
+#
+# No mobile build, emulator, simulator or UI test runs here.
+#
+# Configuration (Settings -> Secrets and variables -> Actions):
+#
+#   vars.BACKEND_REPOSITORY     owner/repo of the ShopTest repository (contains backend/). When set,
+#                               the backend is started from its own docker-compose.yml.
+#   vars.BACKEND_REF            branch/tag/SHA of that repository (default: main)
+#   secrets.BACKEND_REPO_TOKEN  read token, only if that repository is private
+#   vars.MTP_EXTERNAL_BASE_URL  alternative: an already-running *dedicated* CI backend to connect to
+#   vars.MTP_ALLOWED_HOSTS      its host, so the framework's default-deny target check accepts it
+#   secrets.MTP_*_PASSWORD      optional; the backend's documented seed accounts are used otherwise
+#   vars.PACT_BROKER_URL        optional Pact Broker; enables publishing and Broker-sourced verification
+#   secrets.PACT_BROKER_TOKEN   its token (or PACT_BROKER_USERNAME / secrets.PACT_BROKER_PASSWORD)
+#   vars.PACT_DEPLOY_ENVIRONMENT  optional; enables the can-i-deploy gate on main
+#
+# A workflow file existing is not evidence that it passes: see docs/ci.md for what has been run.
+
+name: API and Pact tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: Backend repository ref to test against
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.11.31"
+  FORCE_COLOR: "1"
+
+jobs:
+  quality:
+    name: Lint, types, unit tests, secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pinned dependencies
+        run: uv sync --frozen
+
+      - name: Lock file is current
+        run: uv lock --check
+
+      - name: Ruff
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+
+      - name: mypy --strict
+        run: uv run --frozen mypy
+
+      - name: Framework unit tests
+        run: uv run --frozen pytest -m unit
+
+      - name: Secret scan (gitleaks)
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.30.1
+          dir /repo --config /repo/.gitleaks.toml --redact --no-banner
+
+  api:
+    name: Functional and Pact tests
+    needs: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MTP_ENVIRONMENT: ci
+      MTP_BASE_URL: ${{ vars.MTP_EXTERNAL_BASE_URL || 'http://localhost:8000' }}
+      MTP_ALLOWED_HOSTS: ${{ vars.MTP_ALLOWED_HOSTS }}
+      MTP_RUN_ID: CI-${{ github.run_id }}-${{ github.run_attempt }}
+      MTP_COMMIT_SHA: ${{ github.sha }}
+      MTP_BRANCH: ${{ github.head_ref || github.ref_name }}
+      MTP_BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      MTP_CUSTOMER_PASSWORD: ${{ secrets.MTP_CUSTOMER_PASSWORD }}
+      MTP_PREMIUM_PASSWORD: ${{ secrets.MTP_PREMIUM_PASSWORD }}
+      MTP_ADMIN_PASSWORD: ${{ secrets.MTP_ADMIN_PASSWORD }}
+      MTP_LOCKED_PASSWORD: ${{ secrets.MTP_LOCKED_PASSWORD }}
+      # The Broker is used only when configured and only when secrets are available (not on forks).
+      BROKER_ENABLED: >-
+        ${{ vars.PACT_BROKER_URL != '' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+      MTP_PACT_BROKER_URL: ${{ vars.PACT_BROKER_URL }}
+      MTP_PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      MTP_PACT_BROKER_USERNAME: ${{ vars.PACT_BROKER_USERNAME }}
+      MTP_PACT_BROKER_PASSWORD: ${{ secrets.PACT_BROKER_PASSWORD }}
+      RESULTS: artifacts/runs/CI-${{ github.run_id }}-${{ github.run_attempt }}/allure-results
+      REPORT: artifacts/runs/CI-${{ github.run_id }}-${{ github.run_attempt }}/allure-report
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # --- the backend under test: started from its own repository, never built or modified here ---
+
+      - name: Check out the backend under test
+        if: vars.BACKEND_REPOSITORY != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.BACKEND_REPOSITORY }}
+          ref: ${{ inputs.backend_ref || vars.BACKEND_REF || 'main' }}
+          token: ${{ secrets.BACKEND_REPO_TOKEN || github.token }}
+          path: backend-src
+          persist-credentials: false
+
+      - name: Refuse to run without a dedicated backend
+        if: vars.BACKEND_REPOSITORY == '' && vars.MTP_EXTERNAL_BASE_URL == ''
+        run: |
+          echo "::error::Set vars.BACKEND_REPOSITORY (start the backend here) or vars.MTP_EXTERNAL_BASE_URL (connect to a dedicated CI backend)."
+          exit 1
+
+      - name: Start the backend (ENVIRONMENT=testing), migrate, wait for readiness
+        if: vars.BACKEND_REPOSITORY != ''
+        env:
+          BACKEND_DIR: ${{ github.workspace }}/backend-src/backend
+          BACKEND_ENVIRONMENT: testing
+        run: |
+          scripts/backend.sh up
+          echo "MTP_BACKEND_VERSION=$(scripts/backend.sh version)" >> "$GITHUB_ENV"
+
+      - name: Wait for the external backend
+        if: vars.BACKEND_REPOSITORY == '' && vars.MTP_EXTERNAL_BASE_URL != ''
+        run: scripts/backend.sh wait
+
+      # --- tooling ----------------------------------------------------------------------------------
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pinned dependencies
+        run: uv sync --frozen
+
+      # --- tests: each step's outcome is recorded; the job fails at the end if any failed ---------------
+
+      - name: API functional tests
+        id: functional
+        continue-on-error: true
+        run: uv run --frozen pytest -m functional --alluredir "$RESULTS" --clean-alluredir
+
+      - name: Pact consumer tests
+        id: consumer
+        continue-on-error: true
+        run: uv run --frozen pytest -m pact_consumer --alluredir "$RESULTS"
+
+      - name: Publish consumer contracts to the Pact Broker
+        id: publish
+        if: env.BROKER_ENABLED == 'true' && steps.consumer.outcome == 'success'
+        continue-on-error: true
+        run: >-
+          uv run --frozen python -m api_tests.pact.broker publish
+          --version "$GITHUB_SHA" --branch "$MTP_BRANCH" --build-url "$MTP_BUILD_URL"
+
+      - name: Pact provider verification
+        id: provider
+        continue-on-error: true
+        env:
+          # With a Broker, verify what the Broker selects (main branch, deployed/released, matching
+          # branch) and publish the results; without one, verify the contracts generated above.
+          MTP_PACT_SOURCE: ${{ env.BROKER_ENABLED == 'true' && steps.publish.outcome == 'success' && 'broker' || 'local' }}
+          MTP_PACT_PUBLISH_RESULTS: ${{ env.BROKER_ENABLED == 'true' && steps.publish.outcome == 'success' && 'true' || 'false' }}
+        run: uv run --frozen pytest -m pact_provider --alluredir "$RESULTS"
+
+      # --- report: always, including after failures ---------------------------------------------------
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        if: always()
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Restore Allure history
+        if: always()
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/allure-history
+          key: allure-history-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            allure-history-${{ github.ref_name }}-
+            allure-history-main-
+
+      - name: Generate the Allure report
+        id: report
+        if: always()
+        run: |
+          if [ -d artifacts/allure-history ]; then mkdir -p "$RESULTS/history" && cp -R artifacts/allure-history/. "$RESULTS/history/"; fi
+          allure="$(scripts/install-allure.sh)"
+          "$allure" generate "$RESULTS" --clean -o "$REPORT"
+          rm -rf artifacts/allure-history && mkdir -p artifacts/allure-history
+          cp -R "$REPORT/history/." artifacts/allure-history/
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          stats = json.load(open(os.path.join(os.environ["REPORT"], "widgets", "summary.json")))["statistic"]
+          print("### Allure summary\n")
+          print("| total | passed | failed | broken | skipped |\n|---|---|---|---|---|")
+          print(f"| {stats['total']} | {stats['passed']} | {stats['failed']} | {stats['broken']} | {stats['skipped']} |")
+          EOF
+
+      - name: Save Allure history
+        if: always() && steps.report.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/allure-history
+          key: allure-history-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Collect backend logs
+        if: always() && vars.BACKEND_REPOSITORY != ''
+        env:
+          BACKEND_DIR: ${{ github.workspace }}/backend-src/backend
+        run: scripts/backend.sh logs > artifacts/backend.log 2>&1 || true
+
+      - name: Upload raw Allure results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: allure-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RESULTS }}
+          if-no-files-found: warn
+
+      - name: Upload the Allure HTML report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: allure-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.REPORT }}
+          if-no-files-found: warn
+
+      - name: Upload contracts, run manifests and backend logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pacts/*.json
+            artifacts/runs/*/run.json
+            artifacts/backend.log
+          if-no-files-found: warn
+
+      - name: Stop the backend
+        if: always() && vars.BACKEND_REPOSITORY != ''
+        env:
+          BACKEND_DIR: ${{ github.workspace }}/backend-src/backend
+        run: scripts/backend.sh down || true
+
+      - name: Fail if any test step failed
+        if: always()
+        run: |
+          failed=0
+          for step in "functional=${{ steps.functional.outcome }}" "consumer=${{ steps.consumer.outcome }}" \
+                      "publish=${{ steps.publish.outcome }}" "provider=${{ steps.provider.outcome }}"; do
+            name="${step%%=*}"; outcome="${step#*=}"
+            echo "$name: ${outcome:-not run}"
+            if [ "$outcome" = "failure" ]; then failed=1; fi
+          done
+          exit "$failed"
+
+  can-i-deploy:
+    name: can-i-deploy (Pact Broker)
+    needs: api
+    if: >-
+      vars.PACT_BROKER_URL != '' && vars.PACT_DEPLOY_ENVIRONMENT != '' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MTP_PACT_BROKER_URL: ${{ vars.PACT_BROKER_URL }}
+      MTP_PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+      MTP_PACT_BROKER_USERNAME: ${{ vars.PACT_BROKER_USERNAME }}
+      MTP_PACT_BROKER_PASSWORD: ${{ secrets.PACT_BROKER_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: Can this consumer version be deployed?
+        run: >-
+          uv run --frozen python -m api_tests.pact.broker can-i-deploy
+          --pacticipant "${{ vars.PACT_CONSUMER_NAME || 'MobileTestPlayground-Mobile-API' }}"
+          --version "$GITHUB_SHA" --environment "${{ vars.PACT_DEPLOY_ENVIRONMENT }}"
+          --retries 6 --retry-interval 10
